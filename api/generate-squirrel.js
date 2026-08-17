@@ -19,6 +19,10 @@
  * 5. 保留跟前端一致的請求／回應格式：
  *      request  body: { title, content }
  *      response body: { imageUrl } 或 { error }
+ * 6.【重要修正】Gemini 回傳的是 base64 圖片資料，這一版新增「上傳到 ImgBB
+ *    換成真正的 https 網址」這一步，因為 Gmail 會直接擋掉 base64 (data:image...)
+ *    來源的圖片，導致提醒信附圖失效。回傳給前端的 imageUrl 現在一定是
+ *    https://i.ibb.co/... 這種真正的網址，可以放心塞進 Email 樣板。
  */
 
 const GEMINI_MODEL = "gemini-2.5-flash-image";
@@ -129,7 +133,38 @@ async function callGemini(prompt) {
 
   const mimeType = imagePart.inlineData.mimeType || "image/png";
   const base64 = imagePart.inlineData.data;
-  return `data:${mimeType};base64,${base64}`;
+  return { base64, mimeType };
+}
+
+/* ------------------------------------------------------------------ */
+/* 4.5 把 base64 圖片上傳到 ImgBB，換成真正的 https 網址。              */
+/*     Gmail 會擋掉 data:image base64 來源的圖片，所以 Email 附圖       */
+/*     一定要是這種外部託管的真實網址才會顯示出來。                     */
+/* ------------------------------------------------------------------ */
+async function uploadToImgBB(base64) {
+  const apiKey = process.env.IMGBB_API_KEY;
+  if (!apiKey) {
+    throw new Error("IMGBB_API_KEY 環境變數沒有設定，無法把圖片換成 https 網址");
+  }
+
+  const form = new URLSearchParams();
+  form.append("key", apiKey);
+  form.append("image", base64);
+
+  const res = await fetch("https://api.imgbb.com/1/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString(),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok || !data?.data?.url) {
+    console.error("ImgBB 上傳失敗", res.status, JSON.stringify(data).slice(0, 500));
+    throw new Error("上傳圖片到 ImgBB 失敗");
+  }
+
+  return data.data.url; // 例如 https://i.ibb.co/xxxxxxx/xxx.png
 }
 
 /* ------------------------------------------------------------------ */
@@ -168,8 +203,12 @@ export default async function handler(req, res) {
   console.log(prompt);
 
   try {
-    const imageUrl = await callGemini(prompt);
-    console.log("Gemini 生圖成功，圖片長度（bytes 概估）：", imageUrl.length);
+    const { base64, mimeType } = await callGemini(prompt);
+    console.log("Gemini 生圖成功，mimeType：", mimeType, "，base64 長度：", base64.length);
+
+    const imageUrl = await uploadToImgBB(base64);
+    console.log("已上傳到 ImgBB，網址：", imageUrl);
+
     res.status(200).json({ imageUrl, themeId });
   } catch (err) {
     console.error("generate-squirrel 失敗：", err.message);
