@@ -3,21 +3,39 @@
  *
  * 功能：
  * 1. 接收前端傳來的 { title, content }
- * 2. 從 SQUIRREL_REFERENCE_IMAGE_URL 下載固定的「Nut Nut 母版松鼠圖」
+ * 2. 直接讀取 repo 內的固定 Nut Nut 母版圖（assets/squirrel-reference.png）
  * 3. 把「母版圖片 + 任務文字」一起送給 Gemini 生圖
  * 4. 將 Gemini 回傳的 base64 圖片上傳到 ImgBB
- * 5. 回傳 { imageUrl, themeId }
+ * 5. 如果 Gemini 生圖失敗，改上傳「固定母版圖」當 fallback
+ * 6. 回傳 { imageUrl, themeId }
+ *
+ * 這版不再依賴外部圖床當母版來源，
+ * 所以不需要再抓 SQUIRREL_REFERENCE_IMAGE_URL，也不會再遇到 403。
  */
+
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const GEMINI_MODEL = "gemini-2.5-flash-image";
 
 const GEMINI_API_URL =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
+/* 母版圖固定路徑 */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const REFERENCE_IMAGE_PATH = path.join(
+  __dirname,
+  "..",
+  "assets",
+  "squirrel-reference.png",
+);
+
 /* ------------------------------------------------------------------ */
 /* 1. themeId 只保留給前端相容使用，不再拿它限制 Gemini 要畫什麼       */
 /* ------------------------------------------------------------------ */
-
 const THEME_KEYWORDS = [
   {
     id: "urgent",
@@ -83,49 +101,38 @@ function detectThemeId(title = "", content = "") {
 }
 
 /* ------------------------------------------------------------------ */
-/* 2. 下載固定的 Nut Nut 母版圖片，轉成 Gemini 可吃的 base64           */
+/* 2. 直接從 repo 內讀固定 Nut Nut 母版圖                              */
 /* ------------------------------------------------------------------ */
 
-async function fetchReferenceImage() {
-  const imageUrl = process.env.SQUIRREL_REFERENCE_IMAGE_URL;
+function getMimeTypeFromFilePath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
 
-  if (!imageUrl) {
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+
+  throw new Error(
+    `不支援的母版圖格式：${ext}。請使用 .png / .jpg / .jpeg / .webp`
+  );
+}
+
+async function loadReferenceImage() {
+  let buffer;
+
+  try {
+    buffer = await readFile(REFERENCE_IMAGE_PATH);
+  } catch (error) {
     throw new Error(
-      "SQUIRREL_REFERENCE_IMAGE_URL 環境變數沒有設定"
+      `讀取 repo 內母版圖失敗：${REFERENCE_IMAGE_PATH}。請確認 assets/squirrel-reference.png 存在`
     );
   }
 
-  const res = await fetch(imageUrl);
-
-  if (!res.ok) {
-    throw new Error(
-      `下載松鼠母版圖片失敗（狀態碼 ${res.status}）`
-    );
+  if (!buffer || !buffer.length) {
+    throw new Error("母版圖內容是空的");
   }
 
-  const rawContentType =
-    res.headers.get("content-type") || "";
-
-  const mimeType = rawContentType
-    .split(";")[0]
-    .trim()
-    .toLowerCase();
-
-  if (!mimeType.startsWith("image/")) {
-    throw new Error(
-      "SQUIRREL_REFERENCE_IMAGE_URL 不是直接圖片網址。請使用 ImgBB 的 Direct link（應直接開出 PNG/JPG 圖片）"
-    );
-  }
-
-  const arrayBuffer = await res.arrayBuffer();
-
-  const base64 = Buffer.from(
-    arrayBuffer
-  ).toString("base64");
-
-  if (!base64) {
-    throw new Error("松鼠母版圖片內容是空的");
-  }
+  const mimeType = getMimeTypeFromFilePath(REFERENCE_IMAGE_PATH);
+  const base64 = buffer.toString("base64");
 
   return {
     base64,
@@ -168,7 +175,6 @@ Preserve from the reference image as faithfully as possible:
 
 Do NOT redesign the mascot.
 Do NOT switch to another art style.
-
 Do NOT make it:
 - realistic
 - photographic
@@ -199,7 +205,6 @@ Do NOT add:
 - UI text
 
 Default to ONE Nut Nut character.
-
 Only change what is needed to communicate the user's task, such as:
 - pose
 - facial expression
@@ -228,50 +233,37 @@ Create one clean illustration showing the same Nut Nut mascot naturally performi
 /* 4. 母版圖片 + Prompt 一起送給 Gemini                                */
 /* ------------------------------------------------------------------ */
 
-async function callGemini(
-  prompt,
-  referenceImage
-) {
+async function callGemini(prompt, referenceImage) {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    throw new Error(
-      "GEMINI_API_KEY 環境變數沒有設定"
-    );
+    throw new Error("GEMINI_API_KEY 環境變數沒有設定");
   }
 
   const res = await fetch(
     `${GEMINI_API_URL}?key=${apiKey}`,
     {
       method: "POST",
-
       headers: {
         "Content-Type": "application/json",
       },
-
       body: JSON.stringify({
         contents: [
           {
             role: "user",
-
             parts: [
               {
                 inlineData: {
-                  mimeType:
-                    referenceImage.mimeType,
-
-                  data:
-                    referenceImage.base64,
+                  mimeType: referenceImage.mimeType,
+                  data: referenceImage.base64,
                 },
               },
-
               {
                 text: prompt,
               },
             ],
           },
         ],
-
         generationConfig: {
           responseModalities: ["IMAGE"],
         },
@@ -296,8 +288,7 @@ async function callGemini(
   }
 
   const parts =
-    data?.candidates?.[0]?.content?.parts ||
-    [];
+    data?.candidates?.[0]?.content?.parts || [];
 
   const imagePart = parts.find(
     (part) => part.inlineData?.data
@@ -309,28 +300,22 @@ async function callGemini(
       JSON.stringify(data).slice(0, 1000)
     );
 
-    throw new Error(
-      "Gemini 沒有回傳圖片"
-    );
+    throw new Error("Gemini 沒有回傳圖片");
   }
 
   return {
-    base64:
-      imagePart.inlineData.data,
-
+    base64: imagePart.inlineData.data,
     mimeType:
-      imagePart.inlineData.mimeType ||
-      "image/png",
+      imagePart.inlineData.mimeType || "image/png",
   };
 }
 
 /* ------------------------------------------------------------------ */
-/* 5. 把 Gemini 產出的 base64 圖片上傳到 ImgBB                         */
+/* 5. 把圖片上傳到 ImgBB                                               */
 /* ------------------------------------------------------------------ */
 
 async function uploadToImgBB(base64) {
-  const apiKey =
-    process.env.IMGBB_API_KEY;
+  const apiKey = process.env.IMGBB_API_KEY;
 
   if (!apiKey) {
     throw new Error(
@@ -338,9 +323,7 @@ async function uploadToImgBB(base64) {
     );
   }
 
-  const form =
-    new URLSearchParams();
-
+  const form = new URLSearchParams();
   form.append("key", apiKey);
   form.append("image", base64);
 
@@ -348,12 +331,10 @@ async function uploadToImgBB(base64) {
     "https://api.imgbb.com/1/upload",
     {
       method: "POST",
-
       headers: {
         "Content-Type":
           "application/x-www-form-urlencoded",
       },
-
       body: form.toString(),
     }
   );
@@ -362,19 +343,14 @@ async function uploadToImgBB(base64) {
     .json()
     .catch(() => ({}));
 
-  if (
-    !res.ok ||
-    !data?.data?.url
-  ) {
+  if (!res.ok || !data?.data?.url) {
     console.error(
       "ImgBB 上傳失敗",
       res.status,
       JSON.stringify(data).slice(0, 1000)
     );
 
-    throw new Error(
-      "上傳圖片到 ImgBB 失敗"
-    );
+    throw new Error("上傳圖片到 ImgBB 失敗");
   }
 
   return data.data.url;
@@ -384,20 +360,12 @@ async function uploadToImgBB(base64) {
 /* 6. Vercel Serverless Function                                      */
 /* ------------------------------------------------------------------ */
 
-export default async function handler(
-  req,
-  res
-) {
-  res.setHeader(
-    "Access-Control-Allow-Origin",
-    "*"
-  );
-
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
     "Access-Control-Allow-Methods",
     "POST, OPTIONS"
   );
-
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type"
@@ -412,103 +380,92 @@ export default async function handler(
     res.status(405).json({
       error: "只接受 POST 請求",
     });
-
     return;
   }
 
-  const {
-    title,
-    content,
-  } = req.body || {};
+  const { title, content } = req.body || {};
 
   if (!title) {
     res.status(400).json({
       error: "缺少 title 欄位",
     });
-
     return;
   }
 
-  const themeId =
-    detectThemeId(title, content);
+  const themeId = detectThemeId(title, content);
+  const prompt = buildPrompt(title, content);
 
-  const prompt =
-    buildPrompt(title, content);
-
-  console.log(
-    "=== generate-squirrel 開始 ==="
-  );
-
-  console.log(
-    "任務標題：",
-    title
-  );
-
-  console.log(
-    "themeId：",
-    themeId
-  );
-
-  console.log(
-    "已啟用 Nut Nut reference image：是"
-  );
+  console.log("=== generate-squirrel 開始 ===");
+  console.log("任務標題：", title);
+  console.log("themeId：", themeId);
 
   try {
-    /* 先抓固定的松鼠母版 */
-
-    const referenceImage =
-      await fetchReferenceImage();
+    const referenceImage = await loadReferenceImage();
 
     console.log(
-      "母版圖片下載成功，mimeType：",
+      "已成功讀取 repo 內母版圖，mimeType：",
       referenceImage.mimeType,
       "，base64 長度：",
       referenceImage.base64.length
     );
 
-    /* 把母版圖片 + 任務一起交給 Gemini */
+    let imageUrl = "";
+    let fallbackUsed = false;
 
-    const {
-      base64,
-      mimeType,
-    } = await callGemini(
-      prompt,
-      referenceImage
-    );
+    try {
+      /* 優先：Gemini 根據固定母版圖生新圖 */
+      const generatedImage = await callGemini(
+        prompt,
+        referenceImage
+      );
 
-    console.log(
-      "Gemini 生圖成功，mimeType：",
-      mimeType,
-      "，base64 長度：",
-      base64.length
-    );
+      console.log(
+        "Gemini 生圖成功，mimeType：",
+        generatedImage.mimeType,
+        "，base64 長度：",
+        generatedImage.base64.length
+      );
 
-    /* 把新圖片上傳 ImgBB */
+      imageUrl = await uploadToImgBB(
+        generatedImage.base64
+      );
 
-    const imageUrl =
-      await uploadToImgBB(base64);
+      console.log(
+        "已上傳 Gemini 產出圖片到 ImgBB，網址：",
+        imageUrl
+      );
+    } catch (generationError) {
+      /*
+       * 如果 Gemini 生圖失敗：
+       * 不要亂生其他風格的松鼠，
+       * 直接回退成固定母版圖。
+       */
+      console.error(
+        "Gemini 生圖失敗，改用固定母版圖當 fallback：",
+        generationError
+      );
 
-    console.log(
-      "已上傳到 ImgBB，網址：",
-      imageUrl
-    );
+      imageUrl = await uploadToImgBB(
+        referenceImage.base64
+      );
+      fallbackUsed = true;
 
-    /* 維持原本前端的 response 格式 */
+      console.log(
+        "已上傳固定母版圖到 ImgBB（fallback），網址：",
+        imageUrl
+      );
+    }
 
     res.status(200).json({
       imageUrl,
       themeId,
+      fallbackUsed,
     });
   } catch (err) {
-    console.error(
-      "generate-squirrel 失敗：",
-      err
-    );
+    console.error("generate-squirrel 失敗：", err);
 
     res.status(500).json({
-      error:
-        err?.message ||
-        "生圖失敗",
+      error: err?.message || "生圖失敗",
     });
   }
 }
