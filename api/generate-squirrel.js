@@ -7,8 +7,8 @@
  * 1. 接收 { title, content }
  * 2. 直接讀 repo 裡 assets/squirrel-reference.png
  * 3. 將母版圖 + 任務文字交給 Gemini
- * 4. Gemini 成功 → 上傳 ImgBB
- * 5. Gemini 失敗 → 直接使用固定母版圖當 fallback
+ * 4. Gemini 成功 → 上傳 Supabase Storage
+ * 5. Gemini 失敗 → 使用固定母版圖上傳 Supabase Storage
  * 6. 回傳 imageUrl / themeId
  */
 
@@ -166,8 +166,6 @@ async function loadReferenceImage() {
    * ├─ api/
    * └─ assets/
    *    └─ squirrel-reference.png
-   *
-   * 可以直接這樣取得。
    */
 
   const imagePath =
@@ -452,76 +450,211 @@ async function callGemini(
 
 
 /* ================================================================
-   05｜ImgBB
+   05｜Supabase Storage
    ================================================================ */
 
-async function uploadToImgBB(
+async function uploadToSupabaseStorage(
   base64,
+  mimeType = "image/png",
 ) {
-  const apiKey =
-    process.env.IMGBB_API_KEY;
+  /*
+   * 注意：
+   * 這裡使用你目前 Vercel 已存在的環境變數名稱：
+   *
+   * SUPABASE_URL_
+   * SUPABASE_SECRET_KEY
+   */
 
-  if (!apiKey) {
+  const supabaseUrl =
+    process.env.SUPABASE_URL_;
+
+  const supabaseSecretKey =
+    process.env.SUPABASE_SECRET_KEY;
+
+  if (!supabaseUrl) {
     throw new Error(
-      "IMGBB_API_KEY 環境變數沒有設定",
+      "SUPABASE_URL_ 環境變數沒有設定",
     );
   }
 
-  const form =
-    new URLSearchParams();
+  if (!supabaseSecretKey) {
+    throw new Error(
+      "SUPABASE_SECRET_KEY 環境變數沒有設定",
+    );
+  }
 
-  form.append(
-    "key",
-    apiKey,
+  /*
+   * Supabase Storage Bucket
+   *
+   * 請確認 Supabase 裡真的有：
+   *
+   * nutnut-images
+   */
+
+  const bucketName =
+    "nutnut-images";
+
+
+  /*
+   * 根據圖片 MIME Type 決定副檔名
+   */
+
+  let extension = "png";
+
+  if (
+    mimeType === "image/jpeg"
+  ) {
+    extension = "jpg";
+  } else if (
+    mimeType === "image/webp"
+  ) {
+    extension = "webp";
+  }
+
+
+  /*
+   * 建立唯一檔名
+   */
+
+  const fileName =
+    `nutnut-${Date.now()}-` +
+    `${Math.random()
+      .toString(36)
+      .slice(2, 8)}` +
+    `.${extension}`;
+
+
+  /*
+   * Storage 裡的實際路徑：
+   *
+   * nutnut-images/
+   * └── generated/
+   *     └── nutnut-xxxxx.png
+   */
+
+  const filePath =
+    `generated/${fileName}`;
+
+
+  /*
+   * Gemini Base64 → Buffer
+   */
+
+  const imageBuffer =
+    Buffer.from(
+      base64,
+      "base64",
+    );
+
+
+  console.log(
+    "⬆️ 開始上傳 Supabase Storage...",
   );
 
-  form.append(
-    "image",
-    base64,
+  console.log(
+    "Bucket：",
+    bucketName,
   );
+
+  console.log(
+    "檔案：",
+    filePath,
+  );
+
+  console.log(
+    "圖片大小：",
+    imageBuffer.length,
+  );
+
+
+  /*
+   * Supabase Storage REST API
+   */
+
+  const uploadUrl =
+    `${supabaseUrl}/storage/v1/object/` +
+    `${bucketName}/${filePath}`;
+
 
   const response =
     await fetch(
-      "https://api.imgbb.com/1/upload",
+      uploadUrl,
       {
         method: "POST",
 
         headers: {
+          Authorization:
+            `Bearer ${supabaseSecretKey}`,
+
+          apikey:
+            supabaseSecretKey,
+
           "Content-Type":
-            "application/x-www-form-urlencoded",
+            mimeType,
+
+          "x-upsert":
+            "false",
         },
 
         body:
-          form.toString(),
+          imageBuffer,
       },
     );
 
-  const data =
+
+  const result =
     await response
       .json()
       .catch(
         () => ({}),
       );
 
-  if (
-    !response.ok ||
-    !data?.data?.url
-  ) {
+
+  /*
+   * Supabase 上傳失敗
+   */
+
+  if (!response.ok) {
     console.error(
-      "ImgBB 上傳失敗：",
+      "❌ Supabase Storage 上傳失敗：",
       response.status,
-      JSON.stringify(data).slice(
+      JSON.stringify(
+        result,
+      ).slice(
         0,
         1500,
       ),
     );
 
     throw new Error(
-      `ImgBB 上傳失敗（${response.status}）`,
+      `Supabase Storage 上傳失敗（${response.status}）`,
     );
   }
 
-  return data.data.url;
+
+  /*
+   * Public Bucket 公開圖片 URL
+   *
+   * Gmail / EmailJS 會使用這個網址。
+   */
+
+  const imageUrl =
+    `${supabaseUrl}/storage/v1/object/public/` +
+    `${bucketName}/${filePath}`;
+
+
+  console.log(
+    "✅ Supabase Storage 上傳成功：",
+    filePath,
+  );
+
+  console.log(
+    "🖼️ Nut Nut 圖片 URL：",
+    imageUrl,
+  );
+
+
+  return imageUrl;
 }
 
 
@@ -569,10 +702,12 @@ export default async function handler(
     return;
   }
 
+
   const {
     title,
     content,
   } = req.body || {};
+
 
   if (!title) {
     res.status(400).json({
@@ -583,17 +718,20 @@ export default async function handler(
     return;
   }
 
+
   const themeId =
     detectThemeId(
       title,
       content,
     );
 
+
   const prompt =
     buildPrompt(
       title,
       content,
     );
+
 
   console.log(
     "=== generate-squirrel 開始 ===",
@@ -609,13 +747,16 @@ export default async function handler(
     themeId,
   );
 
+
   try {
     /*
      * Step 1：
      * 讀取 repo 內固定 Nut Nut 母版。
      */
+
     const referenceImage =
       await loadReferenceImage();
+
 
     console.log(
       "✅ Nut Nut 母版讀取成功",
@@ -629,6 +770,7 @@ export default async function handler(
 
 
     let imageUrl = "";
+
     let fallbackUsed = false;
 
 
@@ -637,11 +779,13 @@ export default async function handler(
        * Step 2：
        * 使用 Gemini 根據母版生新圖。
        */
+
       const generatedImage =
         await callGemini(
           prompt,
           referenceImage,
         );
+
 
       console.log(
         "✅ Gemini 生圖成功",
@@ -656,28 +800,33 @@ export default async function handler(
 
       /*
        * Step 3：
-       * 上傳 Gemini 生成圖。
+       * 將 Gemini 生成圖
+       * 上傳到 Supabase Storage。
        */
+
       imageUrl =
-        await uploadToImgBB(
+        await uploadToSupabaseStorage(
           generatedImage.base64,
+          generatedImage.mimeType,
         );
 
+
       console.log(
-        "✅ Gemini 圖片已上傳 ImgBB：",
+        "✅ Gemini 圖片已上傳 Supabase Storage：",
         imageUrl,
       );
+
+
     } catch (
       generationError
     ) {
+
       /*
-       * 最重要：
+       * Gemini 生圖失敗時：
        *
-       * Gemini 失敗時
-       * 不再使用 Pollinations，
-       * 也不會再亂生成別隻松鼠。
+       * 不使用其他 AI 生圖服務。
        *
-       * 直接用官方母版圖。
+       * 直接使用固定 Nut Nut 母版。
        */
 
       console.error(
@@ -685,12 +834,21 @@ export default async function handler(
         generationError,
       );
 
+
+      /*
+       * 將 Nut Nut 母版也上傳到
+       * Supabase Storage。
+       */
+
       imageUrl =
-        await uploadToImgBB(
+        await uploadToSupabaseStorage(
           referenceImage.base64,
+          "image/png",
         );
 
+
       fallbackUsed = true;
+
 
       console.log(
         "✅ 已使用固定 Nut Nut 母版 fallback：",
@@ -699,16 +857,24 @@ export default async function handler(
     }
 
 
+    /*
+     * 成功回傳
+     */
+
     res.status(200).json({
       imageUrl,
       themeId,
       fallbackUsed,
     });
+
+
   } catch (error) {
+
     console.error(
       "❌ generate-squirrel 失敗：",
       error,
     );
+
 
     res.status(500).json({
       error:
