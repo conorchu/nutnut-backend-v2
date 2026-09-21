@@ -466,7 +466,7 @@ async function uploadToSupabaseStorage(
    */
 
   const supabaseUrl =
-    process.env.SUPABASE_URL_;
+    process.env.SUPABASE_URL;
 
   const supabaseSecretKey =
     process.env.SUPABASE_SECRET_KEY;
