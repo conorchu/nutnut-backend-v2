@@ -15,7 +15,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const GEMINI_MODEL = "gemini-2.5-flash-image";
+const GEMINI_MODEL = "gemini-3.1-flash-image";
 
 const GEMINI_API_URL =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
